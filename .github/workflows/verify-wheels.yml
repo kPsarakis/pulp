@@ -31,7 +31,8 @@ jobs:
           - { runner: ubuntu-24.04-arm, python: '3.15t', artifact: wheels-linux-aarch64 }
           - { runner: windows-latest, python: '3.12', artifact: wheels-windows-x64 }
           - { runner: windows-latest, python: '3.15', artifact: wheels-windows-x64 }
-          - { runner: windows-latest, python: '3.12', artifact: wheels-windows-x86, arch: x86 }
+          # only a cp313 win32 wheel is built, as in PuLP 4.2.0
+          - { runner: windows-latest, python: '3.13', artifact: wheels-windows-x86, arch: x86 }
           - { runner: windows-11-arm, python: '3.12', artifact: wheels-windows-aarch64, arch: arm64 }
           - { runner: macos-latest, python: '3.12', artifact: wheels-macos-aarch64 }
           - { runner: macos-latest, python: '3.15', artifact: wheels-macos-aarch64 }
