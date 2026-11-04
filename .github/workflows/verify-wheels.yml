@@ -1,0 +1,137 @@
+# Fork-only check, not part of the upstream PR: install the wheels built by a
+# CI.yml run and run pulptest against each one.
+name: Verify wheels
+
+on:
+  push:
+    branches: [verify-cp315-wheels]
+
+env:
+  # CI.yml run (workflow_dispatch on cp315-cross-wheels) whose wheels are tested
+  WHEELS_RUN_ID: "41819911163"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  native:
+    name: ${{ matrix.artifact }} py${{ matrix.python }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, python: '3.12', artifact: wheels-linux-x86_64 }
+          - { runner: ubuntu-latest, python: '3.15', artifact: wheels-linux-x86_64 }
+          - { runner: ubuntu-latest, python: '3.15t', artifact: wheels-linux-x86_64 }
+          - { runner: ubuntu-24.04-arm, python: '3.12', artifact: wheels-linux-aarch64 }
+          - { runner: ubuntu-24.04-arm, python: '3.15', artifact: wheels-linux-aarch64 }
+          - { runner: ubuntu-24.04-arm, python: '3.15t', artifact: wheels-linux-aarch64 }
+          - { runner: windows-latest, python: '3.12', artifact: wheels-windows-x64 }
+          - { runner: windows-latest, python: '3.15', artifact: wheels-windows-x64 }
+          - { runner: windows-latest, python: '3.12', artifact: wheels-windows-x86, arch: x86 }
+          - { runner: windows-11-arm, python: '3.12', artifact: wheels-windows-aarch64, arch: arm64 }
+          - { runner: macos-latest, python: '3.12', artifact: wheels-macos-aarch64 }
+          - { runner: macos-latest, python: '3.15', artifact: wheels-macos-aarch64 }
+          - { runner: macos-15-intel, python: '3.12', artifact: wheels-macos-x86_64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.arch }}
+      # pydantic-core (orloge -> cpsat-logutils -> pydantic) has no
+      # free-threaded 3.15 wheels, so pip builds it from source
+      - if: endsWith(matrix.python, 't')
+        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+          run-id: ${{ env.WHEELS_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Install the built wheel
+        run: |
+          ls dist
+          python -m pip install -U pip
+          python -m pip install orloge
+          python -m pip install "cbcbox<2.931" || echo "::notice::no cbcbox wheel here, CBC tests will skip"
+          python -m pip install --no-index --no-deps --find-links dist pulp
+          python -c "import sys, pulp, pulp._rustcore as r; print(sys.version); print(pulp.__version__, r.__file__)"
+          python -c "import sys; print('GIL enabled:', getattr(sys, '_is_gil_enabled', lambda: True)())"
+      - name: pulptest
+        working-directory: ${{ runner.temp }}
+        run: pulptest
+
+  emulated:
+    name: ${{ matrix.target.artifact }} py${{ matrix.python }}
+    runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.15']
+        target:
+          - { runner: ubuntu-latest, platform: linux/386, image: slim, artifact: wheels-linux-x86 }
+          - { runner: ubuntu-latest, platform: linux/arm/v7, image: slim, artifact: wheels-linux-armv7 }
+          - { runner: ubuntu-latest, platform: linux/s390x, image: slim, artifact: wheels-linux-s390x }
+          - { runner: ubuntu-latest, platform: linux/ppc64le, image: slim, artifact: wheels-linux-ppc64le }
+          - { runner: ubuntu-latest, platform: linux/amd64, image: alpine, artifact: wheels-musllinux-x86_64 }
+          # no musllinux i686 pydantic-core wheels, so it is built from source
+          - { runner: ubuntu-latest, platform: linux/386, image: alpine, artifact: wheels-musllinux-x86, setup: 'apk add --no-cache build-base cargo' }
+          - { runner: ubuntu-24.04-arm, platform: linux/arm64, image: alpine, artifact: wheels-musllinux-aarch64 }
+          - { runner: ubuntu-latest, platform: linux/arm/v7, image: alpine, artifact: wheels-musllinux-armv7 }
+    steps:
+      - uses: docker/setup-qemu-action@v4
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.target.artifact }}
+          path: dist
+          run-id: ${{ env.WHEELS_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Install the built wheel and run pulptest
+        env:
+          PLATFORM: ${{ matrix.target.platform }}
+          IMAGE: python:${{ matrix.python }}-${{ matrix.target.image }}
+          SETUP: ${{ matrix.target.setup }}
+        run: |
+          ls dist
+          docker run --rm --platform "$PLATFORM" -v "$PWD/dist:/dist:ro" -e SETUP "$IMAGE" sh -euxc '
+            python -VV
+            uname -m
+            if [ -n "$SETUP" ]; then sh -c "$SETUP"; fi
+            export PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1
+            pip install orloge
+            pip install --no-index --no-deps --find-links /dist pulp
+            python -c "import pulp, pulp._rustcore as r; print(pulp.__version__, r.__file__)"
+            cd /tmp && pulptest
+          '
+
+  sdist:
+    name: sdist py3.15
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.15'
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheels-sdist
+          path: dist
+          run-id: ${{ env.WHEELS_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Build and install from the sdist
+        run: |
+          ls dist
+          python -m pip install -U pip
+          python -m pip install orloge "cbcbox<2.931"
+          python -m pip install --no-deps --no-binary pulp dist/pulp-*.tar.gz
+          python -c "import pulp, pulp._rustcore as r; print(pulp.__version__, r.__file__)"
+      - name: pulptest
+        working-directory: ${{ runner.temp }}
+        run: pulptest
